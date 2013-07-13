@@ -39,6 +39,12 @@
       <artifactId>grizzled-scala_${scala.version}</artifactId>
       <version>1.0.13</version>
     </dependency>
+
+    <dependency>
+      <groupId>org.apache.httpcomponents</groupId>
+      <artifactId>httpclient</artifactId>
+      <version>4.2.5</version>
+    </dependency>
   </dependencies>
 
   <build>

@@ -14,14 +14,28 @@ import org.pircbotx.hooks.events._
 import org.pircbotx.hooks.managers.ThreadedListenerManager
 import grizzled.config.Configuration
 import io.Source
+import org.apache.http.impl.client.DefaultHttpClient
+import org.apache.http.client.methods.{HttpUriRequest, HttpGet}
+import org.apache.http.util.EntityUtils
+import org.apache.http.params.BasicHttpParams
+import org.apache.http.client.params.HttpClientParams
+import org.apache.http.client.{RedirectStrategy, RedirectHandler}
+import org.apache.http.protocol.HttpContext
+import org.apache.http.{HttpRequest, HttpResponse}
+import java.net.URLEncoder
 
 class Derpbird[T <: PircBotX] extends ListenerAdapter[T] with Listener[T] {
 
   var configs = new HashMap[String, Configuration]
 
-  // Regexes to match input from IRC.
+  // Regexes to match twitter input from IRC.
   val sup_match = """^sup\s+(\S+).*""".r
   val ext_match = """.*twitter\.com/.+?/status?e?s/(\d+)/?$""".r
+
+  // Regexes to match rdio input from IRC.
+  // http://rd.io/x/QB1eK37z9A/
+  val rdio_match = """.*rd\.io/x/(.*)/""".r
+
 
   // Keep the config around so we can use it to rejoin channels on reconnect.
   def addConfig(server: String, config: Configuration) {
@@ -95,12 +109,86 @@ class Derpbird[T <: PircBotX] extends ListenerAdapter[T] with Listener[T] {
       event.getMessage.trim match {
         case sup_match(username) => TwitterFetch ! TwitterMessageFetchForUser(event, username)
         case ext_match(tweetId)  => TwitterFetch ! TwitterMessageFetchForId(event, tweetId)
+        case rdio_match(rdioId)  => RdioFetch ! RdioFetchForId(event, rdioId)
         case _ => null
       }
 
     } catch {
       case e: Exception => {
         e.printStackTrace()
+      }
+    }
+  }
+}
+
+case class RdioFetchForId(event: MessageEvent[_ <: PircBotX], id: String)
+
+object RdioFetch extends Actor {
+
+  class DontRedirectStrategy extends RedirectStrategy {
+    def isRedirected(p1: HttpRequest, p2: HttpResponse, p3: HttpContext): Boolean = false
+    def getRedirect(p1: HttpRequest, p2: HttpResponse, p3: HttpContext): HttpUriRequest = null
+  }
+
+  val httpClient = new DefaultHttpClient()
+  httpClient.setRedirectStrategy(new DontRedirectStrategy)
+
+  val urlRegex = """https://www.rdio.com/artist/(.*)/album/.*/track/(.*)/""".r
+
+  def findOnYoutube(event: MessageEvent[_ <: PircBotX], artist: String, track: String) {
+    val q = URLEncoder.encode("%s %s".format(artist, track))
+    val httpGet = new HttpGet("https://gdata.youtube.com/feeds/api/videos?q=%s&max-results=1&alt=json".format(q))
+    val response = httpClient.execute(httpGet)
+
+    try {
+      val contentInputStream = response.getEntity.getContent
+      val contentSource = scala.io.Source.fromInputStream(contentInputStream, "UTF-8")
+      val content = contentSource.mkString
+      contentSource.close()
+
+      println(contentSource)
+
+      // do something useful with the response body
+      // and ensure it is fully consumed
+      EntityUtils.consume(response.getEntity)
+    } finally {
+      httpGet.releaseConnection()
+    }
+  }
+
+  def fetchRdioAndConvertToYoutube(event: MessageEvent[_ <: PircBotX], rdioId: String) {
+    try {
+      val httpGet = new HttpGet("https://www.rdio.com/x/%s/".format(rdioId))
+      val response = httpClient.execute(httpGet)
+
+      try {
+        val fullUrl = response.getFirstHeader("Location").getValue
+        httpGet.releaseConnection()
+        fullUrl match {
+          case urlRegex(artist, track) => findOnYoutube(event, artist, track)
+          case _ => println("Couldnt extract track from Rdio link")
+        }
+
+        // do something useful with the response body
+        // and ensure it is fully consumed
+        EntityUtils.consume(response.getEntity)
+      } finally {
+        httpGet.releaseConnection()
+      }
+
+      event.getBot.sendMessage(event.getChannel, rdioId)
+    } catch {
+      case e: Exception => {
+        println("Failed get Rdio Link: " + e.getMessage)
+      }
+    }
+  }
+
+  def act() {
+    loop {
+      react {
+        case RdioFetchForId(event, rdioId) => fetchRdioAndConvertToYoutube(event, rdioId)
+        case _ => null
       }
     }
   }
@@ -166,6 +254,7 @@ object Main {
 
     // Fire up the Actor that will send requests to Twitter.
     TwitterFetch.start()
+    RdioFetch.start()
 
     // Allow # and . in section names. Allow ; in comments.
     val validSection   = """([a-zA-Z0-9_\.\/#]+)""".r
