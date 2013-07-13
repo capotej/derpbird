@@ -22,7 +22,7 @@ import org.apache.http.client.params.HttpClientParams
 import org.apache.http.client.{RedirectStrategy, RedirectHandler}
 import org.apache.http.protocol.HttpContext
 import org.apache.http.{HttpRequest, HttpResponse}
-import java.net.URLEncoder
+import java.net.{URLDecoder, URLEncoder}
 
 class Derpbird[T <: PircBotX] extends ListenerAdapter[T] with Listener[T] {
 
@@ -136,21 +136,31 @@ object RdioFetch extends Actor {
   val urlRegex = """https://www.rdio.com/artist/(.*)/album/.*/track/(.*)/""".r
 
   def findOnYoutube(event: MessageEvent[_ <: PircBotX], artist: String, track: String) {
-    val q = URLEncoder.encode("%s %s".format(artist, track))
-    val httpGet = new HttpGet("https://gdata.youtube.com/feeds/api/videos?q=%s&max-results=1&alt=json".format(q))
+    //decode and clean the rdio track url
+    val cleanedTitle = URLDecoder.decode("%s %s".format(artist, track), "UTF-8").replace('_', ' ')
+    val encodedQuery = URLEncoder.encode(cleanedTitle, "UTF-8")
+
+    val httpGet = new HttpGet("https://gdata.youtube.com/feeds/api/videos?q=%s&max-results=1&alt=json".format(encodedQuery))
     val response = httpClient.execute(httpGet)
 
     try {
-      val contentInputStream = response.getEntity.getContent
-      val contentSource = scala.io.Source.fromInputStream(contentInputStream, "UTF-8")
-      val content = contentSource.mkString
-      contentSource.close()
+      val body = EntityUtils.toByteArray(response.getEntity)
+      val json = new String(body)
+      httpGet.releaseConnection()
 
-      println(contentSource)
+      //parse the response with json, rofl
+      val roflParse = """media\$player":\[\{"url":"(.*)"}],""".r
 
-      // do something useful with the response body
-      // and ensure it is fully consumed
-      EntityUtils.consume(response.getEntity)
+      roflParse.findFirstMatchIn(json) match {
+        case Some(foundMatch) if foundMatch.subgroups.nonEmpty =>
+          val url = foundMatch.subgroups.head
+          //unsure why the regex captures more than needed, doing this to fix
+          val trailingPart = """"}],"""
+          val splitUrl = url.split(trailingPart).head
+
+          event.getBot.sendMessage(event.getChannel, splitUrl)
+      }
+
     } finally {
       httpGet.releaseConnection()
     }
@@ -175,8 +185,6 @@ object RdioFetch extends Actor {
       } finally {
         httpGet.releaseConnection()
       }
-
-      event.getBot.sendMessage(event.getChannel, rdioId)
     } catch {
       case e: Exception => {
         println("Failed get Rdio Link: " + e.getMessage)
