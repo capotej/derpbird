@@ -28,15 +28,6 @@ class Derpbird[T <: PircBotX] extends ListenerAdapter[T] with Listener[T] {
 
   var configs = new HashMap[String, Configuration]
 
-  // Regexes to match twitter input from IRC.
-  val sup_match = """^sup\s+(\S+).*""".r
-  val ext_match = """.*twitter\.com/.+?/status?e?s/(\d+)/?$""".r
-
-  // Regexes to match rdio input from IRC.
-  // http://rd.io/x/QB1eK37z9A/
-  val rdio_match = """.*rd\.io/x/(.*)/""".r
-
-
   // Keep the config around so we can use it to rejoin channels on reconnect.
   def addConfig(server: String, config: Configuration) {
     configs += server -> config
@@ -107,143 +98,17 @@ class Derpbird[T <: PircBotX] extends ListenerAdapter[T] with Listener[T] {
 
       // Strip trailing white space before matching.
       event.getMessage.trim match {
-        case sup_match(username) => TwitterFetch ! TwitterMessageFetchForUser(event, username)
-        case ext_match(tweetId)  => TwitterFetch ! TwitterMessageFetchForId(event, tweetId)
-        case rdio_match(rdioId)  => RdioFetch ! RdioFetchForId(event, rdioId)
+        case TwitterFetch.sup_match(username) => TwitterFetch ! TwitterMessageFetchForUser(event, username)
+        case TwitterFetch.ext_match(tweetId) => TwitterFetch ! TwitterMessageFetchForId(event, tweetId)
+        case RdioFetch.rdio_match(rdioId) => RdioFetch ! RdioFetchForId(event, rdioId)
+        case YoutubeFetch.youtube_match(query) => YoutubeFetch ! YoutubeFetchWithQuery(event, query)
+        case SpotifyFetch.spotify_match(id) => SpotifyFetch ! SpotifyFetchForId(event, id)
         case _ => null
       }
 
     } catch {
       case e: Exception => {
         e.printStackTrace()
-      }
-    }
-  }
-}
-
-case class RdioFetchForId(event: MessageEvent[_ <: PircBotX], id: String)
-
-object RdioFetch extends Actor {
-
-  class DontRedirectStrategy extends RedirectStrategy {
-    def isRedirected(p1: HttpRequest, p2: HttpResponse, p3: HttpContext): Boolean = false
-    def getRedirect(p1: HttpRequest, p2: HttpResponse, p3: HttpContext): HttpUriRequest = null
-  }
-
-  val httpClient = new DefaultHttpClient()
-  httpClient.setRedirectStrategy(new DontRedirectStrategy)
-
-  val urlRegex = """https://www.rdio.com/artist/(.*)/album/.*/track/(.*)/""".r
-
-  def findOnYoutube(event: MessageEvent[_ <: PircBotX], artist: String, track: String) {
-    //decode and clean the rdio track url
-    val cleanedTitle = URLDecoder.decode("%s %s".format(artist, track), "UTF-8").replace('_', ' ')
-    val encodedQuery = URLEncoder.encode(cleanedTitle, "UTF-8")
-
-    val httpGet = new HttpGet("https://gdata.youtube.com/feeds/api/videos?q=%s&max-results=1&alt=json".format(encodedQuery))
-    val response = httpClient.execute(httpGet)
-
-    try {
-      val body = EntityUtils.toByteArray(response.getEntity)
-      val json = new String(body)
-      httpGet.releaseConnection()
-
-      //parse the response with json, rofl
-      val roflParse = """media\$player":\[\{"url":"(.*)"}],""".r
-
-      roflParse.findFirstMatchIn(json) match {
-        case Some(foundMatch) if foundMatch.subgroups.nonEmpty =>
-          val url = foundMatch.subgroups.head
-          //unsure why the regex captures more than needed, doing this to fix
-          val trailingPart = """"}],"""
-          val splitUrl = url.split(trailingPart).head
-
-          event.getBot.sendMessage(event.getChannel, splitUrl)
-      }
-
-    } finally {
-      httpGet.releaseConnection()
-    }
-  }
-
-  def fetchRdioAndConvertToYoutube(event: MessageEvent[_ <: PircBotX], rdioId: String) {
-    try {
-      val httpGet = new HttpGet("https://www.rdio.com/x/%s/".format(rdioId))
-      val response = httpClient.execute(httpGet)
-
-      try {
-        val fullUrl = response.getFirstHeader("Location").getValue
-        httpGet.releaseConnection()
-        fullUrl match {
-          case urlRegex(artist, track) => findOnYoutube(event, artist, track)
-          case _ => println("Couldnt extract track from Rdio link")
-        }
-
-        // do something useful with the response body
-        // and ensure it is fully consumed
-        EntityUtils.consume(response.getEntity)
-      } finally {
-        httpGet.releaseConnection()
-      }
-    } catch {
-      case e: Exception => {
-        println("Failed get Rdio Link: " + e.getMessage)
-      }
-    }
-  }
-
-  def act() {
-    loop {
-      react {
-        case RdioFetchForId(event, rdioId) => fetchRdioAndConvertToYoutube(event, rdioId)
-        case _ => null
-      }
-    }
-  }
-}
-
-// Actor matching.
-case class TwitterMessageFetchForUser(event: MessageEvent[_ <: PircBotX], username: String)
-case class TwitterMessageFetchForId(event: MessageEvent[_ <: PircBotX], id: String)
-
-object TwitterFetch extends Actor {
-
-  val twitter = new TwitterFactory().getInstance
-
-  def formatStatus(status: Status) = {
-    "<" + status.getUser.getScreenName + "> " + status.getText.replaceAll("[\\r\\n]", " ")
-  }
-
-  def fetchTimeLineForUser(event: MessageEvent[_ <: PircBotX], username: String) {
-    try {
-      event.getBot.sendMessage(event.getChannel, formatStatus(twitter.getUserTimeline(username).get(0)))
-
-    } catch {
-      case e: Exception => {
-        println("Failed to get timeline: " + e.getMessage)
-      }
-    }
-  }
-
-  def fetchTweet(event: MessageEvent[_ <: PircBotX], id: String) {
-    try {
-      event.getBot.sendMessage(event.getChannel, formatStatus(twitter.showStatus(id.toLong)))
-
-    } catch {
-      case e: Exception => {
-        println("Failed to get timeline: " + e.getMessage)
-      }
-    }
-  }
-
-  def act() {
-    twitter.verifyCredentials
-
-    loop {
-      react {
-        case TwitterMessageFetchForUser(event, username) => fetchTimeLineForUser(event, username)
-        case TwitterMessageFetchForId(event, tweetId) => fetchTweet(event, tweetId)
-        case _ => null
       }
     }
   }
@@ -260,9 +125,11 @@ object Main {
 
     println("Derpbird starting up..")
 
-    // Fire up the Actor that will send requests to Twitter.
+    // Fire up the Actors
     TwitterFetch.start()
     RdioFetch.start()
+    YoutubeFetch.start()
+    SpotifyFetch.start()
 
     // Allow # and . in section names. Allow ; in comments.
     val validSection   = """([a-zA-Z0-9_\.\/#]+)""".r
